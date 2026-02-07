@@ -6,35 +6,118 @@ Provides enhanced breed insights and contextual information using Google's Gemin
 import os
 import json
 import requests
-from typing import Dict, List, Optional, Any
+import base64
+from typing import Dict, List, Optional, Any, Tuple
 import time
 
 class GeminiAI:
     def __init__(self, api_key: Optional[str] = None):
         """
-        Initialize Gemini AI client
+        Initialize Gemini AI client via OpenRouter
         
         Args:
-            api_key: Google AI Studio API key. If None, will try to get from environment.
+            api_key: OpenRouter API key. If None, will try to get from environment.
         """
         self.api_key = api_key or os.getenv('GEMINI_API_KEY')
-        self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
+        self.base_url = "https://openrouter.ai/api/v1/chat/completions"
+        self.model_vision = "google/gemini-2.0-flash-exp:free"  # Free vision model
+        self.model_text = "google/gemini-2.0-flash-exp:free"    # Free text model
         
         if not self.api_key:
-            print("⚠️  Gemini API key not found. Set GEMINI_API_KEY environment variable.")
-            print("   Get your API key from: https://aistudio.google.com/app/apikey")
+            print("⚠️  OpenRouter API key not found. Set GEMINI_API_KEY environment variable.")
+            print("   Get your API key from: https://openrouter.ai/keys")
             self.enabled = False
         else:
             self.enabled = True
-            print("✅ Gemini AI initialized successfully")
+            print("✅ Gemini AI (via OpenRouter) initialized successfully")
     
     def is_enabled(self) -> bool:
         """Check if Gemini AI is properly configured"""
         return self.enabled and bool(self.api_key)
     
+    def analyze_image_for_cow(self, image_bytes: bytes) -> Tuple[bool, str]:
+        """
+        Analyze image to determine if it contains a cow.
+        
+        Args:
+            image_bytes: Raw image bytes
+            
+        Returns:
+            Tuple of (is_cow: bool, message: str)
+        """
+        if not self.is_enabled():
+            return True, "Gemini AI not configured - skipping cow validation"
+        
+        try:
+            # Convert image to base64
+            image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+            
+            # Prepare request for OpenRouter
+            headers = {
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {self.api_key}',
+                'HTTP-Referer': 'http://localhost:5000',
+                'X-Title': 'Cattle Breed Recognition'
+            }
+            
+            data = {
+                "model": self.model_vision,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Is there a cow or cattle animal visible in this image? Respond with ONLY 'YES' if you clearly see a cow/cattle/bovine, or 'NO' if you see something else (like a dog, cat, person, or any non-cattle animal/object). After YES or NO, add a hyphen and brief reason."
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{image_base64}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "max_tokens": 100,
+                "temperature": 0.1
+            }
+            
+            response = requests.post(self.base_url, headers=headers, json=data, timeout=30)
+            
+            if response.status_code == 200:
+                result = response.json()
+                if 'choices' in result and len(result['choices']) > 0:
+                    text = result['choices'][0]['message']['content'].strip()
+                    
+                    # Parse response
+                    text_upper = text.upper()
+                    if text_upper.startswith('YES'):
+                        reason = text.split('-', 1)[1].strip() if '-' in text else "Cow detected"
+                        return True, f"Valid cow image: {reason}"
+                    elif text_upper.startswith('NO'):
+                        reason = text.split('-', 1)[1].strip() if '-' in text else "Not a cow"
+                        return False, f"This image does not contain a cow. {reason}"
+                    else:
+                        # Unclear response
+                        return False, f"Could not verify cow in image. AI response: {text}"
+            else:
+                print(f"❌ OpenRouter Vision API error: {response.status_code}")
+                error_text = response.json() if response.text else {}
+                print(f"Error details: {error_text}")
+                # Fail open - allow image through if API fails
+                return True, f"Cow validation service temporarily unavailable"
+                
+        except Exception as e:
+            print(f"❌ Cow detection error: {str(e)}")
+            # Fail open - allow image through if error occurs
+            return True, f"Cow validation error: {str(e)}"
+        
+        return True, "Cow validation completed"
+    
     def generate_content(self, prompt: str, max_tokens: int = 500) -> Optional[str]:
         """
-        Generate content using Gemini AI
+        Generate content using Gemini AI via OpenRouter
         
         Args:
             prompt: The input prompt
@@ -48,33 +131,33 @@ class GeminiAI:
             
         try:
             headers = {
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {self.api_key}',
+                'HTTP-Referer': 'http://localhost:5000',
+                'X-Title': 'Cattle Breed Recognition'
             }
             
             data = {
-                "contents": [
+                "model": self.model_text,
+                "messages": [
                     {
-                        "parts": [
-                            {"text": prompt}
-                        ]
+                        "role": "user",
+                        "content": prompt
                     }
                 ],
-                "generationConfig": {
-                    "maxOutputTokens": max_tokens,
-                    "temperature": 0.7
-                }
+                "max_tokens": max_tokens,
+                "temperature": 0.7
             }
             
-            url = f"{self.base_url}?key={self.api_key}"
-            response = requests.post(url, headers=headers, json=data, timeout=30)
+            response = requests.post(self.base_url, headers=headers, json=data, timeout=30)
             
             if response.status_code == 200:
                 result = response.json()
-                if 'candidates' in result and len(result['candidates']) > 0:
-                    content = result['candidates'][0]['content']['parts'][0]['text']
+                if 'choices' in result and len(result['choices']) > 0:
+                    content = result['choices'][0]['message']['content']
                     return content.strip()
             else:
-                print(f"❌ Gemini API error: {response.status_code} - {response.text}")
+                print(f"❌ OpenRouter API error: {response.status_code} - {response.text}")
                 
         except Exception as e:
             print(f"❌ Gemini AI error: {str(e)}")
@@ -250,11 +333,14 @@ class GeminiAI:
             "ai_generated": False
         }
 
-# Global Gemini AI instance
-gemini_ai = GeminiAI()
+# Global Gemini AI instance (will be initialized lazily)
+gemini_ai = None
 
 def get_gemini_client() -> GeminiAI:
-    """Get the global Gemini AI client"""
+    """Get the global Gemini AI client (lazy initialization)"""
+    global gemini_ai
+    if gemini_ai is None:
+        gemini_ai = GeminiAI()
     return gemini_ai
 
 def test_gemini_connection() -> Dict[str, Any]:

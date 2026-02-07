@@ -14,6 +14,7 @@ from torchvision import models, transforms
 from PIL import Image
 import io
 import time
+import base64
 from dotenv import load_dotenv
 from breed_info import get_breed_info, get_all_breeds
 from gemini_integration import get_gemini_client, test_gemini_connection
@@ -133,13 +134,15 @@ def health():
     """Health check endpoint."""
     ready = MODEL is not None and CLASS_NAMES is not None
     return jsonify({
-        'status': 'healthy' if ready else 'initializing',
+        'status': 'healthy' if ready else 'error',
         'version': '1.0.0',
+        'mode': 'production',
         'device': str(DEVICE),
         'model_loaded': ready,
+        'model_type': 'ResNet18' if ready else 'none',
         'num_classes': len(CLASS_NAMES) if CLASS_NAMES else 0,
         'timestamp': time.time()
-    }), 200
+    }), 200 if ready else 503
 
 @app.route('/predict', methods=['POST'])
 def predict():
@@ -147,10 +150,10 @@ def predict():
     start_time = time.time()
     
     try:
-        # Check if model is loaded
-        if MODEL is None or CLASS_NAMES is None:
+        # Check if we have class names (model loaded or demo mode)
+        if CLASS_NAMES is None:
             return jsonify({
-                'error': 'Model not loaded. Please try again later.'
+                'error': 'Service not ready. Please try again later.'
             }), 503
 
         # Handle both 'image' and 'file' keys for compatibility
@@ -171,12 +174,31 @@ def predict():
                 'error': 'Unsupported file type. Use JPG, JPEG, PNG, or WEBP.'
             }), 400
 
-        # Process image
+        # Read image bytes
         img_bytes = file.read()
-        if len(img_bytes) == 0:
-            return jsonify({'error': 'Empty file'}), 400
+        
+        # STEP 1: Validate image format and quality
+        is_valid, validation_message = validate_image(img_bytes)
+        if not is_valid:
+            return jsonify({
+                'error': validation_message,
+                'validation_failed': True
+            }), 400
+        
+        print(f"✅ Image validation passed: {validation_message}")
+        
+        # STEP 2: Validate that image contains a cow
+        is_cow, cow_message = validate_cow_image(img_bytes)
+        if not is_cow:
+            return jsonify({
+                'error': f'Invalid image: {cow_message}',
+                'validation_failed': True,
+                'reason': 'not_a_cow'
+            }), 400
+        
+        print(f"🐄 Cow validation passed: {cow_message}")
 
-        # Get prediction
+        # STEP 3: Process image through ML model
         tensor = transform_image(img_bytes)
         breed_name, confidence = get_prediction(tensor)
         
@@ -184,14 +206,35 @@ def predict():
         
         # Get breed information
         breed_info_data = get_breed_info(breed_name)
+        
+        # STEP 3: Enhance with Gemini AI insights
+        gemini_insights = None
+        gemini_client = get_gemini_client()
+        
+        if gemini_client and gemini_client.is_enabled():
+            try:
+                # Get AI-enhanced breed insights
+                insights = gemini_client.get_breed_insights(breed_name, confidence)
+                gemini_insights = insights
+                print(f"✨ Gemini AI insights added for {breed_name}")
+            except Exception as e:
+                print(f"⚠️  Gemini AI error (non-critical): {str(e)}")
+                gemini_insights = {'error': 'AI insights temporarily unavailable'}
 
-        return jsonify({
+        response = {
             'prediction': breed_name,
             'confidence': confidence,
             'processing_time': processing_time,
             'breed_info': breed_info_data,
-            'timestamp': time.time()
-        }), 200
+            'timestamp': time.time(),
+            'validation': 'passed'
+        }
+        
+        if gemini_insights:
+            response['ai_insights'] = gemini_insights
+            response['enhanced'] = True
+        
+        return jsonify(response), 200
 
     except Exception as e:
         print(f"❌ Prediction error: {str(e)}")
@@ -243,6 +286,82 @@ def allowed_file(filename: str) -> bool:
         return False
     ext = filename.rsplit('.', 1)[1].lower()
     return ext in {'jpg', 'jpeg', 'png', 'webp'}
+
+def validate_image(image_bytes: bytes) -> tuple[bool, str]:
+    """Validate if the uploaded file is a valid image.
+    
+    Args:
+        image_bytes: Raw bytes of the uploaded file
+        
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
+    # Check if file is empty
+    if len(image_bytes) == 0:
+        return False, "Empty file uploaded"
+    
+    # Check file size (minimum 1KB, maximum 10MB)
+    if len(image_bytes) < 1024:
+        return False, "Image file too small. Minimum size is 1KB"
+    
+    if len(image_bytes) > 10 * 1024 * 1024:
+        return False, "Image file too large. Maximum size is 10MB"
+    
+    # Try to open and validate with PIL
+    try:
+        image = Image.open(io.BytesIO(image_bytes))
+        
+        # Verify it's an image by trying to load it
+        image.verify()
+        
+        # Re-open for additional checks (verify() closes the image)
+        image = Image.open(io.BytesIO(image_bytes))
+        
+        # Check format
+        image_format = image.format
+        if image_format not in ['JPEG', 'PNG', 'WEBP']:
+            return False, f"Invalid image format: {image_format}. Please upload JPEG, PNG, or WebP"
+        
+        # Check image dimensions (minimum 100x100, maximum 4000x4000)
+        width, height = image.size
+        if width < 100 or height < 100:
+            return False, f"Image too small ({width}x{height}). Minimum size is 100x100 pixels"
+        
+        if width > 4000 or height > 4000:
+            return False, f"Image too large ({width}x{height}). Maximum size is 4000x4000 pixels"
+        
+        # Check if image is corrupted by trying to convert
+        image.convert('RGB')
+        
+        return True, "Image validation successful"
+        
+    except Exception as e:
+        return False, f"Invalid or corrupted image: {str(e)}"
+
+def validate_cow_image(image_bytes: bytes) -> tuple[bool, str]:
+    """Use Gemini AI to validate if image contains a cow/cattle.
+    
+    Args:
+        image_bytes: Raw bytes of the uploaded image
+        
+    Returns:
+        Tuple of (is_cow, message)
+    """
+    gemini_client = get_gemini_client()
+    
+    if not gemini_client or not gemini_client.is_enabled():
+        # If Gemini is not available, skip cow validation
+        return True, "Cow validation skipped (AI not configured)"
+    
+    try:
+        # Use Gemini Vision API to analyze the image
+        is_cow, message = gemini_client.analyze_image_for_cow(image_bytes)
+        return is_cow, message
+        
+    except Exception as e:
+        print(f"⚠️ Cow validation error: {str(e)}")
+        # On error, allow the image through (fail open)
+        return True, f"Cow validation error (proceeding): {str(e)}"
 
 # ======================================================================================
 # GEMINI AI INTEGRATION ENDPOINTS
@@ -394,15 +513,32 @@ def not_found(e):
 # 4. STARTUP
 # ======================================================================================
 
+
+# ======================================================================================
+# 4. INITIALIZATION
+# ======================================================================================
+
+# Attempt to load model at module level for WSGI servers (Gunicorn)
+print("🔄 Initializing model during module import...")
+try:
+    load_model()
+except Exception as e:
+    print(f"⚠️  Warning: Model loading failed during import: {e}")
+    print("    This is expected during build/CI. Model will be needed for predictions.")
+
 if __name__ == '__main__':
     print("🚀 Starting Flask ML API Server...")
     
-    try:
-        load_model()
-        print("✅ Model loaded successfully!")
-    except Exception as e:
-        print(f"❌ Failed to load model: {e}")
-        print("⚠️  Server will start but predictions will not work until model is loaded.")
+    # Check if model loaded successfully
+    if MODEL is None:
+        try:
+            load_model()
+            print("✅ Model loaded successfully!")
+        except Exception as e:
+            print(f"❌ Failed to load model: {e}")
+            print("⚠️  Server will start but predictions will not work until model is loaded.")
+    else:
+        print("✅ Model already loaded from module import.")
     
     port = int(os.environ.get('PORT', 5000))
     print(f"🌐 Server starting on http://0.0.0.0:{port}")
