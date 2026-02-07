@@ -18,6 +18,7 @@ import base64
 from dotenv import load_dotenv
 from breed_info import get_breed_info, get_all_breeds
 from gemini_integration import get_gemini_client, test_gemini_connection
+import gdown
 
 # Load environment variables
 load_dotenv()
@@ -82,8 +83,35 @@ def load_model():
             print(f"📁 Found model at: {model_path}")
             break
     
+    # If model not found locally, try to download valid URL exists
     if model_path is None:
-        raise FileNotFoundError(f"Model not found in any of these locations: {model_paths}")
+        print("⚠️  Model file not found locally. Attempting download...")
+        download_url = os.environ.get('MODEL_DOWNLOAD_URL')
+        
+        if download_url:
+            try:
+                # Create models directory if it doesn't exist
+                models_dir = base_dir / "models"
+                models_dir.mkdir(exist_ok=True)
+                
+                target_path = models_dir / "best_model.pth"
+                print(f"⬇️  Downloading model from {download_url} to {target_path}...")
+                
+                # gdown handles Google Drive URLs automatically
+                output = gdown.download(download_url, str(target_path), quiet=False, fuzzy=True)
+                
+                if output and os.path.exists(output):
+                    model_path = Path(output)
+                    print(f"✅ Model downloaded successfully to: {model_path}")
+                else:
+                    print("❌ Download failed or returned no file.")
+            except Exception as e:
+                print(f"❌ Error downloading model: {e}")
+        else:
+            print("⚠️  MODEL_DOWNLOAD_URL not set in environment variables.")
+
+    if model_path is None or not model_path.is_file():
+        raise FileNotFoundError(f"Model not found in {model_paths} and download failed/skipped.")
     
     model_name = "resnet18"
     
