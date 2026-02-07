@@ -1,0 +1,73 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Environment
+.env
+.venv
+venv/
+venv
+ENV/
+env/
+ENV
+env
+
+# Flask
+instance/
+.webassets-cache
+
+# Unit Test / Coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Project Specific
+# We DO want to commit the model if it's not too large for Git (100MB limit usually)
+# If using Git LFS, track .pth
+# models/*.pth
+# But usually large models are ignored or tracked via LFS
+# Uncomment the below line if you do NOT want to commit the model to git
+# models/
+
+# AWS
+.aws/
+
+# Operating System
+.DS_Store
+Thumbs.db
